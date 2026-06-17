@@ -1,0 +1,7 @@
+pymupdf>=1.23
+pdfplumber>=0.10
+pydantic>=2
+pytest>=7
+# Optional OCR fallback (only used when a PDF has no embedded text):
+# pytesseract>=0.3
+# pdf2image>=1.16

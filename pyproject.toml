@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autometron"
+version = "0.1.0"
+description = "Structured field extraction from financial statement PDFs (RBC credit cards)."
+requires-python = ">=3.10"
+dependencies = [
+    "pymupdf>=1.23",
+    "pdfplumber>=0.10",
+    "pydantic>=2",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+# OCR is only needed as a last resort when a PDF has no embedded text.
+ocr = ["pytesseract>=0.3", "pdf2image>=1.16"]
+
+[project.scripts]
+autometron-statements = "autometron.finance.statements.process:main"
+
+[tool.setuptools.packages.find]
+include = ["autometron*"]
