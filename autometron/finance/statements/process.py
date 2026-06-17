@@ -14,7 +14,7 @@ from pathlib import Path
 
 from . import rbc
 from .extract import extract_text
-from .models import CreditCardStatement
+from .models import CreditCardStatement, Transaction
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ def process_folder(folder: str | Path) -> list[CreditCardStatement]:
 
 
 def write_csv(statements: list[CreditCardStatement], out_path: str | Path) -> None:
-    """Write extracted statements to a CSV at ``out_path``."""
+    """Write the master statement summary CSV to ``out_path``."""
     out_path = Path(out_path)
     with out_path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=CreditCardStatement.csv_columns())
@@ -55,6 +55,44 @@ def write_csv(statements: list[CreditCardStatement], out_path: str | Path) -> No
         for statement in statements:
             writer.writerow(statement.to_csv_row())
     logger.info("Wrote %d statement(s) to %s", len(statements), out_path)
+
+
+def write_transactions_csv(transactions: list[Transaction],
+                           out_path: str | Path) -> None:
+    """Write one statement's transactions (date, posting_date, description,
+    amount) to ``out_path``."""
+    out_path = Path(out_path)
+    with out_path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=Transaction.csv_columns())
+        writer.writeheader()
+        for txn in transactions:
+            writer.writerow(txn.to_csv_row())
+    logger.info("Wrote %d transaction(s) to %s", len(transactions), out_path)
+
+
+def _transactions_filename(statement: CreditCardStatement) -> str:
+    """Stable per-statement transactions filename derived from the source PDF."""
+    stem = Path(statement.source_file).stem if statement.source_file else "statement"
+    return f"{stem}_transactions.csv"
+
+
+def write_statement_transactions(statements: list[CreditCardStatement],
+                                 out_dir: str | Path) -> dict[str, str]:
+    """Write a transactions CSV per statement into ``out_dir``.
+
+    Returns a mapping of source file -> transactions CSV filename.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written: dict[str, str] = {}
+    for statement in statements:
+        name = _transactions_filename(statement)
+        write_transactions_csv(statement.transactions, out_dir / name)
+        if not statement.transactions:
+            logger.warning("No transactions extracted for %s",
+                           statement.source_file or "<unknown>")
+        written[statement.source_file or name] = name
+    return written
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -78,6 +116,11 @@ def main(argv: list[str] | None = None) -> int:
 
     statements = process_folder(args.folder)
     write_csv(statements, args.output)
+
+    # Per-statement transaction CSVs go in a "transactions" folder next to the
+    # master CSV (e.g. statements.csv -> transactions/<pdf-name>_transactions.csv).
+    txn_dir = Path(args.output).resolve().parent / "transactions"
+    write_statement_transactions(statements, txn_dir)
     return 0
 
 

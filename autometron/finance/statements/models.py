@@ -33,6 +33,36 @@ MONEY_FIELDS: tuple[str, ...] = tuple(
 )
 
 
+class Transaction(BaseModel):
+    """A single posted transaction (activity line) on a statement.
+
+    ``amount`` keeps the printed sign: purchases/interest/fees are positive,
+    payments and credits are negative.
+    """
+
+    transaction_date: Optional[date] = None  # date the transaction occurred
+    posting_date: Optional[date] = None       # date it posted to the account
+    description: str = ""
+    amount: Optional[Decimal] = None
+
+    def to_csv_row(self) -> dict[str, str]:
+        return {
+            "date": (
+                "" if self.transaction_date is None
+                else self.transaction_date.isoformat()
+            ),
+            "posting_date": (
+                "" if self.posting_date is None else self.posting_date.isoformat()
+            ),
+            "description": self.description,
+            "amount": "" if self.amount is None else str(self.amount),
+        }
+
+    @staticmethod
+    def csv_columns() -> list[str]:
+        return ["date", "posting_date", "description", "amount"]
+
+
 class CreditCardStatement(BaseModel):
     """Structured fields extracted from a single credit card statement PDF.
 
@@ -62,6 +92,9 @@ class CreditCardStatement(BaseModel):
 
     # field name -> raw source snippet the value was extracted from.
     sources: dict[str, str] = Field(default_factory=dict)
+
+    # Individual activity lines for this statement.
+    transactions: list[Transaction] = Field(default_factory=list)
 
     def missing_fields(self) -> list[str]:
         """Return the names of canonical fields that were not extracted."""

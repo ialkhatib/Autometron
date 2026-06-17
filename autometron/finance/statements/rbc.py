@@ -18,7 +18,9 @@ import logging
 import re
 from typing import Callable, Optional
 
-from .models import CreditCardStatement, STATEMENT_FIELDS
+from datetime import date
+
+from .models import CreditCardStatement, STATEMENT_FIELDS, Transaction
 from .parse import parse_amount, parse_date
 
 logger = logging.getLogger(__name__)
@@ -156,6 +158,107 @@ def _find_field(spec: _FieldSpec, lines: list[str]) -> Optional[tuple[object, st
     return None
 
 
+# --- Transaction (activity line) extraction ---------------------------------
+#
+# RBC prints each activity line as a vertical block of text lines:
+#
+#     OCT 19                      <- transaction date (bare "MON DD", no year)
+#     OCT 20                      <- posting date
+#     STREAMFLIX.COM 800-555-0199 <- description
+#     10000000000000000000001     <- reference number (optional)
+#     Foreign Currency-EUR 20.00  <- FX detail (optional)
+#     Exchange rate-1.385370      <- FX detail (optional)
+#     $9.99                       <- amount (negative for payments/credits)
+#
+# We anchor on two consecutive bare "MON DD" lines and read forward to the
+# first stand-alone amount line. Page headers/footers between blocks are
+# skipped naturally because they don't form a date pair.
+
+_MONTH_ABBR = {
+    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+    "JUL": 7, "AUG": 8, "SEP": 9, "SEPT": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+}
+_TXN_DATE_RE = re.compile(r"^([A-Z]{3,4})\s+(\d{1,2})$")
+_TXN_AMOUNT_RE = re.compile(r"^\(?-?\$?[\d,]+\.\d{2}\)?(?:\s*CR)?$")
+# Lines that sit between description and amount but are not the description.
+_REF_RE = re.compile(r"^\d{6,}$")  # long reference numbers
+
+# How far past the date pair we will look for the amount line.
+_MAX_BLOCK_LINES = 8
+
+
+def _txn_date(month_abbr: str, day: int,
+              statement_date: Optional[date]) -> Optional[date]:
+    """Resolve a bare ``MON DD`` to a full date using the statement's year.
+
+    The statement period is ~1 month, so a transaction month later than the
+    statement's closing month belongs to the previous calendar year (handles
+    December activity on a January statement).
+    """
+    month = _MONTH_ABBR.get(month_abbr.upper())
+    if month is None:
+        return None
+    if statement_date is None:
+        return None
+    year = statement_date.year
+    if month > statement_date.month:
+        year -= 1
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def extract_transactions(text: str,
+                        statement_date: Optional[date] = None) -> list[Transaction]:
+    """Extract individual activity lines from RBC statement ``text``."""
+    lines = [ln.strip() for ln in text.splitlines()]
+    n = len(lines)
+    transactions: list[Transaction] = []
+
+    i = 0
+    while i < n - 2:
+        d1 = _TXN_DATE_RE.match(lines[i])
+        d2 = _TXN_DATE_RE.match(lines[i + 1])
+        if not (d1 and d2):
+            i += 1
+            continue
+
+        description = lines[i + 2]
+        # The description must be real text, not another amount/date line.
+        if not description or _TXN_AMOUNT_RE.match(description):
+            i += 1
+            continue
+
+        # Scan forward for the amount that closes this block.
+        amount_idx: Optional[int] = None
+        limit = min(i + 3 + _MAX_BLOCK_LINES, n)
+        k = i + 3
+        while k < limit:
+            if _TXN_AMOUNT_RE.match(lines[k]):
+                amount_idx = k
+                break
+            # A new date pair means this block had no amount; bail out.
+            if (_TXN_DATE_RE.match(lines[k]) and k + 1 < n
+                    and _TXN_DATE_RE.match(lines[k + 1])):
+                break
+            k += 1
+
+        if amount_idx is None:
+            i += 1
+            continue
+
+        transactions.append(Transaction(
+            transaction_date=_txn_date(d1.group(1), int(d1.group(2)), statement_date),
+            posting_date=_txn_date(d2.group(1), int(d2.group(2)), statement_date),
+            description=description,
+            amount=parse_amount(lines[amount_idx]),
+        ))
+        i = amount_idx + 1
+
+    return transactions
+
+
 # --- Public API -------------------------------------------------------------
 
 def looks_like_rbc(text: str) -> bool:
@@ -190,6 +293,7 @@ def extract_statement(text: str,
         sources=sources,
         **values,
     )
+    statement.transactions = extract_transactions(text, statement.statement_date)
 
     missing = statement.missing_fields()
     if missing:
@@ -200,4 +304,5 @@ def extract_statement(text: str,
     return statement
 
 
-__all__ = ["extract_statement", "looks_like_rbc", "STATEMENT_FIELDS"]
+__all__ = ["extract_statement", "extract_transactions", "looks_like_rbc",
+           "STATEMENT_FIELDS"]

@@ -21,6 +21,16 @@ Each is returned on a `CreditCardStatement` (a pydantic model). A field that
 can't be found is `None` and a warning is logged. For every field that *was*
 found, the raw text snippet it came from is recorded in `statement.sources`.
 
+#### Transactions
+
+Every statement's individual activity lines are also extracted into
+`statement.transactions` — a list of `Transaction` objects with
+`transaction_date`, `posting_date`, `description`, and `amount` (the printed
+sign is kept: purchases/interest are positive, payments/credits negative).
+Multi-line blocks, foreign-currency detail, reference numbers and repeated
+page headers are handled. As a sanity check, on real statements the
+transaction amounts sum exactly from the previous balance to the new balance.
+
 ### How it works
 
 1. **Text extraction** (`extract.py`): PyMuPDF first, pdfplumber as a fallback.
@@ -29,8 +39,11 @@ found, the raw text snippet it came from is recorded in `statement.sources`.
    field as `Label  value`; a limited next-line fallback handles the stacked
    `Label\nvalue` layout used by RBC MasterCard statements. The statement date
    is read from the `STATEMENT FROM … TO <closing date>` period line.
-3. **Output** (`process.py`): processes a folder of PDFs into `statements.csv`,
-   with a value column and a `<field>_source` snippet column per field.
+3. **Output** (`process.py`): processes a folder of PDFs into a master
+   `statements.csv` (a value column and a `<field>_source` snippet column per
+   field), plus one transactions CSV per statement under `transactions/`
+   (`<pdf-name>_transactions.csv`, columns: `date, posting_date, description,
+   amount`).
 
 ### Install
 
@@ -50,12 +63,18 @@ autometron-statements /path/to/folder-of-pdfs -o statements.csv -v
 Library:
 
 ```python
-from autometron.finance.statements import process_folder, process_pdf, write_csv
+from autometron.finance.statements import (
+    process_folder, process_pdf, write_csv, write_statement_transactions,
+)
 
 statement = process_pdf("statement.pdf")
 print(statement.new_balance, statement.sources["new_balance"])
+for txn in statement.transactions:
+    print(txn.transaction_date, txn.amount, txn.description)
 
-write_csv(process_folder("folder/"), "statements.csv")
+statements = process_folder("folder/")
+write_csv(statements, "statements.csv")                 # master summary
+write_statement_transactions(statements, "transactions")  # one CSV per statement
 ```
 
 ### Tests

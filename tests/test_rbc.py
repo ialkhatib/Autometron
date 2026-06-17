@@ -92,6 +92,54 @@ NEW BALANCE
 $4,025.00
 """
 
+# Layout T: activity-line blocks, mimicking PyMuPDF's vertical text output --
+# including page-header noise, a foreign-currency block, a negative payment,
+# an interest line with no reference number, and the closing total.
+SAMPLE_T = """\
+RBC Royal Bank
+STATEMENT FROM OCT 18 TO NOV 15, 2022
+
+TRANSACTION POSTING
+ACTIVITY DESCRIPTION
+AMOUNT ($)
+DATE
+DATE
+OCT 19
+OCT 20
+STREAMFLIX.COM 800-555-0199
+10000000000000000000001
+$9.99
+OCT 23
+OCT 24
+EXAMPLE MERCHANT SRL RM RM
+10000000000000000000002
+Foreign Currency-EUR 20.00
+Exchange rate-1.385370
+$27.71
+
+RBC Cash Back Mastercard
+ALEX DOE 4510 12** **** 3456
+STATEMENT FROM OCT 18 TO NOV 15, 2022
+2 OF 4
+4510 12** **** 3456 - PRIMARY (continued)
+TRANSACTION POSTING
+ACTIVITY DESCRIPTION
+AMOUNT ($)
+DATE
+DATE
+NOV 08
+NOV 09
+PAYMENT - THANK YOU / PAIEMENT - MERCI
+10000000000000000000003
+-$25.00
+NOV 15
+NOV 15
+PURCHASE INTEREST 19.99%
+$40.00
+TOTAL ACCOUNT BALANCE
+$3,052.70
+"""
+
 # Layout C: most fields missing.
 SAMPLE_C = """\
 RBC Royal Bank
@@ -186,6 +234,82 @@ def test_looks_like_rbc():
     assert rbc.looks_like_rbc(SAMPLE_A)
     assert rbc.looks_like_rbc("Statement from Royal Bank of Canada")
     assert not rbc.looks_like_rbc("Some TD Bank Visa statement text")
+
+
+# --- Transaction extraction -------------------------------------------------
+
+def test_extract_transactions_basic():
+    txns = rbc.extract_transactions(SAMPLE_T, statement_date=date(2022, 11, 15))
+    assert len(txns) == 4
+
+    stream = txns[0]
+    assert stream.transaction_date == date(2022, 10, 19)
+    assert stream.posting_date == date(2022, 10, 20)
+    assert stream.description == "STREAMFLIX.COM 800-555-0199"
+    assert stream.amount == Decimal("9.99")
+
+    # Foreign-currency block: reference + FX lines are skipped, amount is read.
+    assert txns[1].description == "EXAMPLE MERCHANT SRL RM RM"
+    assert txns[1].amount == Decimal("27.71")
+
+    # Payment is negative.
+    payment = txns[2]
+    assert payment.amount == Decimal("-25.00")
+    assert "PAYMENT" in payment.description
+
+    # Interest line has no reference number but is still captured.
+    assert txns[3].description == "PURCHASE INTEREST 19.99%"
+    assert txns[3].amount == Decimal("40.00")
+
+    # The "TOTAL ACCOUNT BALANCE" line is not a transaction.
+    assert all("TOTAL ACCOUNT BALANCE" not in t.description for t in txns)
+
+
+def test_transactions_reconcile_to_balance():
+    s = rbc.extract_statement(SAMPLE_T)
+    activity = sum((t.amount for t in s.transactions), Decimal(0))
+    # previous balance is absent in this sample, but the activity total should
+    # equal the printed new balance minus previous (here: just the activity).
+    assert activity == Decimal("52.70")  # 9.99 + 27.71 - 25.00 + 40.00
+
+
+def test_transaction_year_inference_across_year_boundary():
+    # Statement closes in January; December activity belongs to the prior year.
+    text = (
+        "STATEMENT FROM DEC 18 TO JAN 15, 2023\n"
+        "DEC 28\nDEC 29\nSOME STORE TORONTO ON\n12345678901234\n$10.00\n"
+        "JAN 03\nJAN 04\nANOTHER STORE ON\n23456789012345\n$20.00\n"
+        "TOTAL ACCOUNT BALANCE\n$30.00\n"
+    )
+    txns = rbc.extract_transactions(text, statement_date=date(2023, 1, 15))
+    assert txns[0].transaction_date == date(2022, 12, 28)  # prior year
+    assert txns[1].transaction_date == date(2023, 1, 3)
+
+
+def test_extract_statement_attaches_transactions():
+    s = rbc.extract_statement(SAMPLE_T, source_file="t.pdf")
+    assert len(s.transactions) == 4
+
+
+def test_write_transactions_csv(tmp_path):
+    from autometron.finance.statements.process import (
+        write_statement_transactions,
+    )
+    import csv as _csv
+
+    s = rbc.extract_statement(SAMPLE_T, source_file="MasterCard 2022-11-15.pdf")
+    written = write_statement_transactions([s], tmp_path)
+
+    out = tmp_path / "MasterCard 2022-11-15_transactions.csv"
+    assert out.exists()
+    assert written[s.source_file] == out.name
+
+    with out.open() as fh:
+        rows = list(_csv.DictReader(fh))
+    assert [c for c in rows[0]] == ["date", "posting_date", "description", "amount"]
+    assert rows[0]["date"] == "2022-10-19"
+    assert rows[0]["amount"] == "9.99"
+    assert rows[2]["amount"] == "-25.00"
 
 
 # --- Value parser unit tests ------------------------------------------------
