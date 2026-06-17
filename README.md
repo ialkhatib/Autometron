@@ -7,7 +7,8 @@ of each statement *and* a single, de-duplicated ledger of every transaction —
 ready for a spreadsheet, a budget, or a database.
 
 ```bash
-autometron-statements ~/Documents/RBC -o statements.csv
+# Replace path/to/statements with your own RBC statements folder.
+autometron-statements path/to/statements -o statements.csv
 # → statements.csv          one row per statement (balances, dates, limits…)
 # → transactions.csv        every transaction, deduped, ordered by date
 # → transactions/*.csv      one file per statement
@@ -55,7 +56,7 @@ pip install -e .            # or: pip install -r requirements.txt
 ```python
 from autometron.finance.statements import process_folder
 
-statements = process_folder("~/Documents/RBC", recursive=True)
+statements = process_folder("path/to/statements", recursive=True)
 
 s = statements[0]
 print(s.statement_date, s.new_balance, "·", len(s.transactions), "transactions")
@@ -74,15 +75,41 @@ print(s.statement_date, s.new_balance, "·", len(s.transactions), "transactions"
 
 ## Use cases
 
-### 1. Build one ledger from years of statements (CLI)
+### 1. Build `transactions.csv` from every PDF in a folder
+
+`path/to/statements` is a placeholder — point it at your own master RBC folder
+(the PDFs can be in nested subfolders).
 
 ```bash
-autometron-statements ~/Documents/RBC -o statements.csv -v
+# CLI: scan the folder recursively and write a combined transactions.csv
+autometron-statements path/to/statements -o transactions.csv
+
+# If your folder name has spaces, quote it:
+autometron-statements "path/to/My Statements" -o transactions.csv
 ```
 
-Recursively scans every subfolder, skips non-statement PDFs, and writes a single
-`transactions.csv` ordered by statement date. Re-downloaded the same statement
-under a different name? It's counted once.
+This recursively finds every statement PDF, skips anything that isn't an RBC
+statement, and writes one `transactions.csv` ordered by statement date (a
+re-downloaded duplicate of the same statement is counted once). The resulting
+file looks like:
+
+```text
+statement_date,source_file,date,posting_date,description,amount
+2022-11-15,MasterCard 2022-11-15.pdf,2022-10-19,2022-10-20,STREAMFLIX.COM 800-555-0199,9.99
+2022-11-15,MasterCard 2022-11-15.pdf,2022-10-21,2022-10-21,MEGASTORE.CA MEMBERSHIP,9.99
+...
+2022-11-15,MasterCard 2022-11-15.pdf,2022-11-15,2022-11-15,PURCHASE INTEREST 19.99%,40.00
+2026-04-15,MasterCard 2026-04-15.pdf,2026-04-01,2026-04-01,PAYMENT - THANK YOU,-50.00
+```
+
+Equivalent in Python (just the combined `transactions.csv`, nothing else):
+
+```python
+from autometron.finance.statements import process_folder, write_all_transactions_csv
+
+statements = process_folder("path/to/statements", recursive=True)
+write_all_transactions_csv(statements, "transactions.csv")
+```
 
 ### 2. How much did I spend vs. pay in a month?
 
@@ -102,7 +129,7 @@ print(f"Spent ${spent}, paid ${paid}")     # Spent $77.70, paid $25.00
 from collections import Counter
 from autometron.finance.statements import process_folder
 
-statements = process_folder("~/Documents/RBC", recursive=True)
+statements = process_folder("path/to/statements", recursive=True)
 merchants = Counter(
     t.description.split("  ")[0][:24].strip()
     for s in statements for t in s.transactions if t.amount > 0
@@ -117,7 +144,7 @@ for name, times in merchants.most_common(5):
 from decimal import Decimal
 from autometron.finance.statements import process_folder, write_all_transactions_csv
 
-statements = process_folder("~/Documents/RBC", recursive=True)
+statements = process_folder("path/to/statements", recursive=True)
 totals = {}
 for s in statements:
     for t in s.transactions:
