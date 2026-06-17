@@ -1,101 +1,247 @@
 # Autometron
 
-Structured field extraction from financial statement PDFs.
+**Turn a pile of RBC credit card statement PDFs into clean, structured data.**
 
-## Credit card statements (RBC)
+Point Autometron at a folder of statements and it gives you back a tidy summary
+of each statement *and* a single, de-duplicated ledger of every transaction —
+ready for a spreadsheet, a budget, or a database.
 
-`autometron.finance.statements` extracts structured fields from **RBC** credit
-card statement PDFs. It is intentionally *not* a general PDF reader — all
-issuer-specific knowledge (labels, layout quirks) lives in
-[`autometron/finance/statements/rbc.py`](autometron/finance/statements/rbc.py).
-Adding another issuer means adding another module like it; the rest of the
-pipeline is issuer-agnostic.
+```bash
+autometron-statements ~/Documents/RBC -o statements.csv
+# → statements.csv          one row per statement (balances, dates, limits…)
+# → transactions.csv        every transaction, deduped, ordered by date
+# → transactions/*.csv      one file per statement
+```
 
-### Extracted fields
+It is intentionally **not** a general PDF reader. It knows one thing well — RBC
+credit card statements — and all of that issuer-specific knowledge lives in a
+single module, [`autometron/finance/statements/rbc.py`](autometron/finance/statements/rbc.py).
+Adding another bank later means adding another module like it; nothing else changes.
 
-`statement_date`, `payment_due_date`, `credit_limit`, `previous_balance`,
-`payments`, `purchases`, `interest_charged`, `fees`, `new_balance`,
-`minimum_payment`.
+---
 
-Each is returned on a `CreditCardStatement` (a pydantic model). A field that
-can't be found is `None` and a warning is logged. For every field that *was*
-found, the raw text snippet it came from is recorded in `statement.sources`.
+## Why
 
-#### Transactions
+Statement PDFs are designed to be *read*, not *queried*. The numbers you care
+about — what you spent, what recurring charges you have, how interest is adding
+up month over month — are locked in page layouts. Autometron extracts them into
+plain CSV/objects so you can answer those questions in a few lines of code.
 
-Every statement's individual activity lines are also extracted into
-`statement.transactions` — a list of `Transaction` objects with
-`transaction_date`, `posting_date`, `description`, and `amount` (the printed
-sign is kept: purchases/interest are positive, payments/credits negative).
-Multi-line blocks, foreign-currency detail, reference numbers and repeated
-page headers are handled. As a sanity check, on real statements the
-transaction amounts sum exactly from the previous balance to the new balance.
+## Features
 
-### How it works
+- 📄 **Statement summary** — `statement_date`, `payment_due_date`,
+  `credit_limit`, `previous_balance`, `payments`, `purchases`,
+  `interest_charged`, `fees`, `new_balance`, `minimum_payment`.
+- 🧾 **Per-transaction detail** — date, posting date, description, amount (signed).
+- 🗂️ **One combined ledger** — all transactions across all statements, ordered by
+  statement date, **with no double-counting**.
+- 🔍 **Recursive search** of a master folder, and it **skips PDFs that aren't
+  statements** (receipts, manuals, other banks).
+- 🧮 **Auditable** — every extracted field keeps the exact text snippet it came
+  from. On real statements the transactions reconcile *previous → new balance* to
+  the penny.
+- 🛟 **Robust** — a missing field becomes `None` + a warning; a single unreadable
+  PDF never aborts the batch.
 
-1. **Text extraction** (`extract.py`): PyMuPDF first, pdfplumber as a fallback.
-   OCR (`pytesseract` + `pdf2image`) is attempted only if both yield no text.
-2. **Field extraction** (`rbc.py`): regex-based, line-by-line. RBC prints each
-   field as `Label  value`; a limited next-line fallback handles the stacked
-   `Label\nvalue` layout used by RBC MasterCard statements. The statement date
-   is read from the `STATEMENT FROM … TO <closing date>` period line.
-3. **Output** (`process.py`): recursively searches a master folder for PDFs and
-   produces:
-   - a master `statements.csv` (a value column and a `<field>_source` snippet
-     column per field),
-   - one transactions CSV per statement under `transactions/`
-     (`<pdf-name>_transactions.csv`, columns: `date, posting_date, description,
-     amount`),
-   - one combined `transactions.csv` with **all** transactions across every
-     statement, ordered by statement date (columns: `statement_date,
-     source_file, date, posting_date, description, amount`).
-
-   **Not every PDF is a statement.** PDFs that aren't recognised as RBC credit
-   card statements (receipts, manuals, marketing, other issuers) are skipped,
-   and read/parse errors on a single file never abort the batch.
-
-   **No double counting.** The combined `transactions.csv` de-duplicates whole
-   statements keyed on `(statement_date, previous_balance, new_balance)`, so the
-   same statement appearing twice (a copy in another subfolder, or a re-download
-   under a different name) is counted once. Genuinely identical transactions
-   *within* a single statement are kept — they're distinct real charges.
-
-### Install
+## Install
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e .            # or: pip install -r requirements.txt
 ```
 
-### Usage
-
-CLI — recursively scans a master folder and writes `statements.csv`, a combined
-`transactions.csv`, and per-statement CSVs under `transactions/`:
-
-```bash
-autometron-statements /path/to/master-folder -o statements.csv -v
-# options: --no-recursive (top level only), -t/--transactions-output PATH
-```
-
-Library:
+## 30-second quick start
 
 ```python
-from autometron.finance.statements import (
-    process_folder, write_csv, write_statement_transactions,
-    write_all_transactions_csv,
-)
+from autometron.finance.statements import process_folder
 
-# Recursively find statement PDFs in a master folder (non-statements skipped).
-statements = process_folder("master/", recursive=True)
+statements = process_folder("~/Documents/RBC", recursive=True)
 
-write_csv(statements, "statements.csv")                    # master summary
-write_statement_transactions(statements, "transactions")   # one CSV per statement
-write_all_transactions_csv(statements, "transactions.csv") # combined, deduped, ordered
+s = statements[0]
+print(s.statement_date, s.new_balance, "·", len(s.transactions), "transactions")
+# 2022-11-15 3052.70 · 4 transactions
 ```
 
-### Tests
+## Output files
 
-Tests use sample *extracted-text* strings (no real PDFs):
+| File | What's in it | Columns |
+|------|--------------|---------|
+| `statements.csv` | one row per statement | each field + a `<field>_source` snippet |
+| `transactions.csv` | **all** transactions, deduped, ordered by statement date | `statement_date, source_file, date, posting_date, description, amount` |
+| `transactions/<pdf>_transactions.csv` | one statement's transactions | `date, posting_date, description, amount` |
+
+---
+
+## Use cases
+
+### 1. Build one ledger from years of statements (CLI)
+
+```bash
+autometron-statements ~/Documents/RBC -o statements.csv -v
+```
+
+Recursively scans every subfolder, skips non-statement PDFs, and writes a single
+`transactions.csv` ordered by statement date. Re-downloaded the same statement
+under a different name? It's counted once.
+
+### 2. How much did I spend vs. pay in a month?
+
+```python
+from decimal import Decimal
+from autometron.finance.statements import process_pdf
+
+s = process_pdf("MasterCard 2022-11-15.pdf")
+spent  = sum((t.amount for t in s.transactions if t.amount > 0), Decimal(0))
+paid   = sum((-t.amount for t in s.transactions if t.amount < 0), Decimal(0))
+print(f"Spent ${spent}, paid ${paid}")     # Spent $77.70, paid $25.00
+```
+
+### 3. Find recurring subscriptions across all statements
+
+```python
+from collections import Counter
+from autometron.finance.statements import process_folder
+
+statements = process_folder("~/Documents/RBC", recursive=True)
+merchants = Counter(
+    t.description.split("  ")[0][:24].strip()
+    for s in statements for t in s.transactions if t.amount > 0
+)
+for name, times in merchants.most_common(5):
+    print(f"{times:>3}×  {name}")     # 12×  STREAMFLIX.COM …
+```
+
+### 4. Spend by merchant (simple categorization)
+
+```python
+from decimal import Decimal
+from autometron.finance.statements import process_folder, write_all_transactions_csv
+
+statements = process_folder("~/Documents/RBC", recursive=True)
+totals = {}
+for s in statements:
+    for t in s.transactions:
+        if t.amount and t.amount > 0:
+            key = "UBER" if "UBER" in t.description else t.description[:20]
+            totals[key] = totals.get(key, Decimal(0)) + t.amount
+
+for k, v in sorted(totals.items(), key=lambda kv: kv[1], reverse=True)[:5]:
+    print(f"${v:>9}  {k}")
+
+# Or just dump everything to a spreadsheet:
+write_all_transactions_csv(statements, "transactions.csv")
+```
+
+### 5. Reconcile a statement (trust, but verify)
+
+```python
+from decimal import Decimal
+from autometron.finance.statements import process_pdf
+
+s = process_pdf("MasterCard 2022-11-15.pdf")
+activity = sum((t.amount for t in s.transactions), Decimal(0))
+assert s.previous_balance + activity == s.new_balance   # 3000.00 + 52.70 == 3052.70
+```
+
+### 6. Audit where a number came from
+
+```python
+s = process_pdf("MasterCard 2026-04-15.pdf")
+print(s.new_balance)                  # 4025.00
+print(s.sources["new_balance"])       # 'NEW BALANCE | $4,025.00'   ← the source text
+print(s.missing_fields())             # [] (everything was found)
+```
+
+### 7. Hand it a messy folder — it sorts statements from the rest
+
+```python
+from autometron.finance.statements import process_folder
+
+# Folder has statements, receipts, an air-fryer manual, an RBC marketing flyer…
+statements = process_folder("~/Downloads", recursive=True)
+# Only real RBC credit card statements come back; the rest are skipped + logged.
+```
+
+---
+
+## Data model
+
+```python
+class CreditCardStatement(BaseModel):
+    source_file: str | None
+    issuer: str = "RBC"
+    statement_date: date | None
+    payment_due_date: date | None
+    credit_limit: Decimal | None
+    previous_balance: Decimal | None
+    payments: Decimal | None
+    purchases: Decimal | None
+    interest_charged: Decimal | None
+    fees: Decimal | None
+    new_balance: Decimal | None
+    minimum_payment: Decimal | None
+    sources: dict[str, str]            # field name → exact source snippet
+    transactions: list[Transaction]
+
+    def missing_fields(self) -> list[str]: ...
+
+class Transaction(BaseModel):
+    transaction_date: date | None
+    posting_date: date | None
+    description: str
+    amount: Decimal | None             # signed: charges +, payments/credits −
+```
+
+## CLI reference
+
+```text
+autometron-statements FOLDER [options]
+
+  FOLDER                       master folder to scan for statement PDFs
+  -o, --output PATH            master summary CSV   (default: statements.csv)
+  -t, --transactions-output P  combined transactions CSV
+                               (default: transactions.csv next to --output)
+  --recursive / --no-recursive search subfolders (default: recursive)
+  -v, --verbose                info-level logging
+```
+
+## How it works
+
+1. **Text extraction** (`extract.py`) — PyMuPDF first, pdfplumber as a fallback;
+   OCR (`pytesseract` + `pdf2image`) only if both yield no text.
+2. **Classification** — a PDF must show an RBC brand signal *and* statement
+   structure (`new balance`, `payment due date`, …) to be treated as a statement.
+3. **Field extraction** (`rbc.py`) — regex, line-by-line. RBC prints each field
+   as `Label  value` (or `Label` then `value` on the next line, as RBC MasterCard
+   does). The statement date is read from the `STATEMENT FROM … TO <closing date>`
+   period line.
+4. **Transactions** (`rbc.py`) — anchors on two bare `MON DD` date lines, reads
+   through the description / reference number / foreign-currency lines to the
+   amount, and infers the year from the statement period (handles Dec→Jan).
+5. **Output** (`process.py`) — master summary, per-statement CSVs, and one
+   combined `transactions.csv` that de-duplicates whole statements keyed on
+   `(statement_date, previous_balance, new_balance)`. Identical transactions
+   *within* a statement are kept — they're distinct real charges.
+
+## Extending to another issuer
+
+The pipeline (`extract.py`, `models.py`, `parse.py`, `process.py`) is
+issuer-agnostic. To add, say, TD: create `td.py` exposing `extract_statement`,
+`extract_transactions`, and `looks_like_*_statement`, mirroring `rbc.py`, then
+route to it based on the detected issuer. The data model and CSV output are reused
+as-is.
+
+## Limitations
+
+- Tuned to the RBC MasterCard layout seen in real statements. A different RBC
+  template (or RBC Visa) may need small label/regex additions in `rbc.py`; the
+  extractor degrades gracefully (warns, extracts what it can) rather than crashing.
+- No OCR by default — scanned/image-only statements need the optional `ocr` extras.
+- Always sanity-check a new template with the reconciliation in use case 5.
+
+## Tests
+
+39 tests, driven entirely by sample *extracted-text* strings (no real PDFs):
 
 ```bash
 pytest
