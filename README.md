@@ -39,11 +39,26 @@ transaction amounts sum exactly from the previous balance to the new balance.
    field as `Label  value`; a limited next-line fallback handles the stacked
    `Label\nvalue` layout used by RBC MasterCard statements. The statement date
    is read from the `STATEMENT FROM … TO <closing date>` period line.
-3. **Output** (`process.py`): processes a folder of PDFs into a master
-   `statements.csv` (a value column and a `<field>_source` snippet column per
-   field), plus one transactions CSV per statement under `transactions/`
-   (`<pdf-name>_transactions.csv`, columns: `date, posting_date, description,
-   amount`).
+3. **Output** (`process.py`): recursively searches a master folder for PDFs and
+   produces:
+   - a master `statements.csv` (a value column and a `<field>_source` snippet
+     column per field),
+   - one transactions CSV per statement under `transactions/`
+     (`<pdf-name>_transactions.csv`, columns: `date, posting_date, description,
+     amount`),
+   - one combined `transactions.csv` with **all** transactions across every
+     statement, ordered by statement date (columns: `statement_date,
+     source_file, date, posting_date, description, amount`).
+
+   **Not every PDF is a statement.** PDFs that aren't recognised as RBC credit
+   card statements (receipts, manuals, marketing, other issuers) are skipped,
+   and read/parse errors on a single file never abort the batch.
+
+   **No double counting.** The combined `transactions.csv` de-duplicates whole
+   statements keyed on `(statement_date, previous_balance, new_balance)`, so the
+   same statement appearing twice (a copy in another subfolder, or a re-download
+   under a different name) is counted once. Genuinely identical transactions
+   *within* a single statement are kept — they're distinct real charges.
 
 ### Install
 
@@ -54,27 +69,28 @@ pip install -e .            # or: pip install -r requirements.txt
 
 ### Usage
 
-CLI (writes `statements.csv`):
+CLI — recursively scans a master folder and writes `statements.csv`, a combined
+`transactions.csv`, and per-statement CSVs under `transactions/`:
 
 ```bash
-autometron-statements /path/to/folder-of-pdfs -o statements.csv -v
+autometron-statements /path/to/master-folder -o statements.csv -v
+# options: --no-recursive (top level only), -t/--transactions-output PATH
 ```
 
 Library:
 
 ```python
 from autometron.finance.statements import (
-    process_folder, process_pdf, write_csv, write_statement_transactions,
+    process_folder, write_csv, write_statement_transactions,
+    write_all_transactions_csv,
 )
 
-statement = process_pdf("statement.pdf")
-print(statement.new_balance, statement.sources["new_balance"])
-for txn in statement.transactions:
-    print(txn.transaction_date, txn.amount, txn.description)
+# Recursively find statement PDFs in a master folder (non-statements skipped).
+statements = process_folder("master/", recursive=True)
 
-statements = process_folder("folder/")
-write_csv(statements, "statements.csv")                 # master summary
-write_statement_transactions(statements, "transactions")  # one CSV per statement
+write_csv(statements, "statements.csv")                    # master summary
+write_statement_transactions(statements, "transactions")   # one CSV per statement
+write_all_transactions_csv(statements, "transactions.csv") # combined, deduped, ordered
 ```
 
 ### Tests

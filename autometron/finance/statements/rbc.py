@@ -262,11 +262,35 @@ def extract_transactions(text: str,
 # --- Public API -------------------------------------------------------------
 
 def looks_like_rbc(text: str) -> bool:
-    """Heuristic: does this statement text come from RBC?"""
+    """Heuristic: does this text come from RBC (any document)?"""
     needles = ("royal bank of canada", "rbc royal bank", "rbc.com",
                "www.rbc.com", "rbcroyalbank")
     low = text.lower()
     return any(n in low for n in needles) or bool(re.search(r"\bRBC\b", text))
+
+
+# Structural phrases that appear on a credit card statement but not on, say, a
+# receipt, a marketing PDF, or a bank letter. Used to avoid treating arbitrary
+# PDFs in a folder as statements.
+_STATEMENT_MARKERS = (
+    "new balance", "payment due date", "credit limit", "minimum payment",
+    "calculating your balance", "statement from", "previous account balance",
+    "previous statement balance",
+)
+
+
+def looks_like_rbc_statement(text: str, min_markers: int = 2) -> bool:
+    """Heuristic: is this text specifically an RBC *credit card statement*?
+
+    Requires both an RBC brand signal and at least ``min_markers`` structural
+    statement phrases, so unrelated PDFs (receipts, letters, other issuers)
+    are not mistaken for statements.
+    """
+    if not text or not looks_like_rbc(text):
+        return False
+    low = text.lower()
+    hits = sum(1 for marker in _STATEMENT_MARKERS if marker in low)
+    return hits >= min_markers
 
 
 def extract_statement(text: str,
@@ -305,4 +329,4 @@ def extract_statement(text: str,
 
 
 __all__ = ["extract_statement", "extract_transactions", "looks_like_rbc",
-           "STATEMENT_FIELDS"]
+           "looks_like_rbc_statement", "STATEMENT_FIELDS"]

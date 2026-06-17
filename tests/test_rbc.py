@@ -236,6 +236,50 @@ def test_looks_like_rbc():
     assert not rbc.looks_like_rbc("Some TD Bank Visa statement text")
 
 
+def test_looks_like_rbc_statement_rejects_non_statements():
+    assert rbc.looks_like_rbc_statement(SAMPLE_A)
+    assert rbc.looks_like_rbc_statement(SAMPLE_B)
+    # An RBC-branded but non-statement document (no statement structure).
+    assert not rbc.looks_like_rbc_statement(
+        "RBC Royal Bank\nThank you for banking with us. Visit rbc.com.")
+    # A receipt that mentions a balance but isn't an RBC statement.
+    assert not rbc.looks_like_rbc_statement(
+        "Store receipt\nTotal $19.99\nNew balance owing later")
+    # Empty / non-PDF-derived text.
+    assert not rbc.looks_like_rbc_statement("")
+
+
+def test_process_pdf_require_statement_skips_non_statement(tmp_path, monkeypatch):
+    from autometron.finance.statements import process
+
+    pdf = tmp_path / "manual.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    monkeypatch.setattr(process, "extract_text",
+                        lambda p: "Product manual. No financial data here.")
+    assert process.process_pdf(pdf, require_statement=True) is None
+    # Without the flag, direct calls still return a (mostly empty) statement.
+    assert process.process_pdf(pdf, require_statement=False) is not None
+
+
+def test_process_folder_skips_non_statements(tmp_path, monkeypatch):
+    from autometron.finance.statements import process
+
+    (tmp_path / "stmt.pdf").write_bytes(b"%PDF")
+    (tmp_path / "receipt.pdf").write_bytes(b"%PDF")
+    (tmp_path / "manual.pdf").write_bytes(b"%PDF")
+
+    texts = {
+        "stmt.pdf": SAMPLE_A,
+        "receipt.pdf": "Coffee shop receipt total $4.50 thank you",
+        "manual.pdf": "RBC brochure about saving money",  # RBC but not a statement
+    }
+    monkeypatch.setattr(process, "extract_text",
+                        lambda p: texts[__import__("pathlib").Path(p).name])
+
+    statements = process.process_folder(tmp_path, recursive=True)
+    assert [s.source_file for s in statements] == ["stmt.pdf"]
+
+
 # --- Transaction extraction -------------------------------------------------
 
 def test_extract_transactions_basic():
@@ -310,6 +354,103 @@ def test_write_transactions_csv(tmp_path):
     assert rows[0]["date"] == "2022-10-19"
     assert rows[0]["amount"] == "9.99"
     assert rows[2]["amount"] == "-25.00"
+
+
+# --- Combined transactions: recursive search, dedup, ordering ---------------
+
+def _stmt(src, sd, prev, new, txns):
+    """Build a statement with transactions for combine/dedup tests."""
+    from autometron.finance.statements.models import Transaction as _T
+    return CreditCardStatement(
+        source_file=src, statement_date=sd,
+        previous_balance=prev, new_balance=new,
+        transactions=[
+            _T(transaction_date=d, description=desc, amount=Decimal(a))
+            for d, desc, a in txns
+        ],
+    )
+
+
+def test_find_pdfs_recursive_vs_flat(tmp_path):
+    from autometron.finance.statements.process import find_pdfs
+
+    (tmp_path / "a.pdf").write_bytes(b"x")
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "b.PDF").write_bytes(b"x")  # nested + uppercase extension
+
+    flat = find_pdfs(tmp_path, recursive=False)
+    deep = find_pdfs(tmp_path, recursive=True)
+    assert [p.name for p in flat] == ["a.pdf"]
+    assert sorted(p.name for p in deep) == ["a.pdf", "b.PDF"]
+
+
+def test_deduplicate_statements():
+    from autometron.finance.statements.process import deduplicate_statements
+
+    early = _stmt("a.pdf", date(2022, 11, 15), Decimal(0), Decimal(20),
+                  [(date(2022, 10, 19), "N", "9.99")])
+    dup = _stmt("a-copy.pdf", date(2022, 11, 15), Decimal(0), Decimal(20),
+                [(date(2022, 10, 19), "N", "9.99")])  # same key, different name
+    other = _stmt("b.pdf", date(2026, 4, 15), Decimal(0), Decimal(1),
+                  [(date(2026, 4, 1), "X", "1.00")])
+
+    unique = deduplicate_statements([early, dup, other])
+    assert [s.source_file for s in unique] == ["a.pdf", "b.pdf"]
+
+
+def test_combined_rows_ordered_by_statement_date_and_deduped():
+    from autometron.finance.statements.process import combined_transaction_rows
+
+    late = _stmt("b.pdf", date(2026, 4, 15), Decimal(0), Decimal(1),
+                 [(date(2026, 4, 1), "X", "1.00")])
+    early = _stmt("a.pdf", date(2022, 11, 15), Decimal(0), Decimal(20),
+                  [(date(2022, 11, 1), "M", "5.00"),
+                   (date(2022, 10, 19), "N", "9.99")])
+    dup = _stmt("a-copy.pdf", date(2022, 11, 15), Decimal(0), Decimal(20),
+                [(date(2022, 11, 1), "M", "5.00")])  # duplicate statement
+
+    rows = combined_transaction_rows([late, early, dup])
+
+    # Duplicate statement's transactions are not counted again.
+    assert len(rows) == 3
+    # Ordered by statement date, then transaction date within a statement.
+    assert [r["statement_date"] for r in rows] == [
+        "2022-11-15", "2022-11-15", "2026-04-15"]
+    assert [r["date"] for r in rows] == [
+        "2022-10-19", "2022-11-01", "2026-04-01"]
+    assert rows[0]["source_file"] == "a.pdf"
+
+
+def test_combined_rows_keep_identical_within_statement():
+    from autometron.finance.statements.process import combined_transaction_rows
+
+    # Two identical real charges on the same day must both survive.
+    s = _stmt("c.pdf", date(2024, 1, 15), Decimal(0), Decimal(20),
+              [(date(2024, 1, 5), "UBER EATS", "10.00"),
+               (date(2024, 1, 5), "UBER EATS", "10.00")])
+    rows = combined_transaction_rows([s])
+    assert len(rows) == 2
+    assert all(r["description"] == "UBER EATS" for r in rows)
+
+
+def test_write_all_transactions_csv(tmp_path):
+    from autometron.finance.statements.process import write_all_transactions_csv
+    import csv as _csv
+
+    early = rbc.extract_statement(SAMPLE_T, source_file="nov.pdf")  # 2022-11-15
+    dup = rbc.extract_statement(SAMPLE_T, source_file="nov-copy.pdf")  # duplicate
+    out = tmp_path / "transactions.csv"
+
+    count = write_all_transactions_csv([early, dup], out)
+    with out.open() as fh:
+        rows = list(_csv.DictReader(fh))
+
+    assert count == len(rows) == 4  # duplicate statement not double-counted
+    assert list(rows[0].keys()) == [
+        "statement_date", "source_file", "date", "posting_date",
+        "description", "amount"]
+    assert all(r["statement_date"] == "2022-11-15" for r in rows)
 
 
 # --- Value parser unit tests ------------------------------------------------

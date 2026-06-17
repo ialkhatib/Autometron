@@ -18,6 +18,7 @@ env/
 
 # Extraction output / inputs (may contain personal financial data — never commit)
 statements.csv
+transactions.csv
 *_transactions.csv
 transactions/
 *.pdf
